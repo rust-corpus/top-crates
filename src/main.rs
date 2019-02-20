@@ -150,16 +150,21 @@ lazy_static! {
 impl TopCrates {
     /// List top 100 crates by number of downloads on crates.io.
     fn download() -> TopCrates {
-        let resp =
-            reqwest::get("https://crates.io/api/v1/crates?page=1&per_page=100&sort=downloads")
-            .expect("Could not fetch top crates");
-        assert!(resp.status().is_success());
-
-        serde_json::from_reader(resp).expect("Invalid JSON")
+        let mut crates = Vec::new();
+        for page in 1..6 {
+            let url = format!("https://crates.io/api/v1/crates?page={}&per_page=100&sort=downloads", page);
+            let resp = reqwest::get(&url).expect("Could not fetch top crates");
+            assert!(resp.status().is_success());
+            let page_crates: TopCrates = serde_json::from_reader(resp).expect("Invalid JSON");
+            crates.extend(page_crates.crates.into_iter());
+        }
+        TopCrates {
+            crates: crates,
+        }
     }
 
     /// Add crates that have been hand-picked
-    fn add_curated_crates(&mut self) {
+    fn _add_curated_crates(&mut self) {
         self.crates.extend({
             MODIFICATIONS
                 .additions
@@ -290,16 +295,12 @@ fn main() {
     let mut source = RegistrySource::remote(&crates_io, &config);
     source.update().expect("Unable to update registry");
 
-    let mut top = TopCrates::download();
-    top.add_curated_crates();
+    let top = TopCrates::download();
 
     // Find the newest (non-prerelease, non-yanked) versions of all
     // the interesting crates.
     let mut summaries = Vec::new();
     for Crate { ref name } in top.crates {
-        if MODIFICATIONS.blacklisted(name) {
-            continue;
-        }
 
         // Query the registry for a summary of this crate.
         // Usefully, this doesn't seem to include yanked versions
@@ -317,71 +318,76 @@ fn main() {
             .unwrap_or_else(|| panic!("Registry has no viable versions of {}", name));
 
         // Add a dependency on this crate.
-        summaries.push((summary, Method::Required {
-            dev_deps: false,
-            features: &[],
-            uses_default_features: true,
-            all_features: false,
-        }));
+//      summaries.push((summary, Method::Required {
+//          dev_deps: false,
+//          features: &[],
+//          uses_default_features: true,
+//          all_features: false,
+//      }));
+        summaries.push(CrateInformation {
+            name: summary.name().to_string(),
+            version: summary.version().to_string(),
+            id: summary.package_id().to_string(),
+        });
     }
 
-    // Resolve transitive dependencies.
-    let mut registry = PackageRegistry::new(&config)
-        .expect("Unable to create package registry");
-    registry.lock_patches();
-    let try_to_use = HashSet::new();
-    let res = resolver::resolve(&summaries, &[], &mut registry, &try_to_use, None, true)
-        .expect("Unable to resolve dependencies");
-
-    // Construct playground's Cargo.toml.
-    let mut unique_latest_crates = unique_latest_crates(res);
-
-    let mut infos = Vec::new();
-
-    for (name, spec) in &mut unique_latest_crates {
-        let version = spec.version();
-
-        let pkgid = cargo::core::PackageId::new(&name, &version, &crates_io)
-            .unwrap_or_else(|e| panic!("Unable to build PackageId for {} {}: {}", name, version, e));
-
-        let pkg = source.download(&pkgid)
-            .unwrap_or_else(|e| panic!("Unable to download {} {}: {}", name, version, e));
-
-        for target in pkg.targets() {
-            if let cargo::core::TargetKind::Lib(_) = *target.kind() {
-                infos.push(CrateInformation {
-                    name: name.clone(),
-                    version: version.clone(),
-                    id: target.crate_name()
-                })
-            }
-        }
-
-        fill_playground_metadata_features(spec, &pkg);
-    }
-
-    let manifest = TomlManifest {
-        package: TomlPackage {
-            name: "playground".to_owned(),
-            version: "0.0.1".to_owned(),
-            authors: vec!["The Rust Playground".to_owned()],
-        },
-        profile: Profiles {
-            dev: Profile { codegen_units: 1, incremental: false },
-            release: Profile { codegen_units: 1, incremental: false },
-        },
-        dependencies: unique_latest_crates,
-    };
-
-    // Write manifest file.
-    let cargo_toml = "../compiler/base/Cargo.toml";
-    write_manifest(manifest, cargo_toml);
-    println!("wrote {}", cargo_toml);
-
-    let path = "../compiler/base/crate-information.json";
+    let path = "../data/crate-information.json";
     let mut f = File::create(path)
         .unwrap_or_else(|e| panic!("Unable to create {}: {}", path, e));
-    serde_json::to_writer_pretty(&mut f, &infos)
+    serde_json::to_writer_pretty(&mut f, &summaries)
         .unwrap_or_else(|e| panic!("Unable to write {}: {}", path, e));
     println!("Wrote {}", path);
+
+//  // Resolve transitive dependencies.
+//  let mut registry = PackageRegistry::new(&config)
+//      .expect("Unable to create package registry");
+//  registry.lock_patches();
+//  let try_to_use = HashSet::new();
+//  let res = resolver::resolve(&summaries, &[], &mut registry, &try_to_use, None, true)
+//      .expect("Unable to resolve dependencies");
+
+//  // Construct playground's Cargo.toml.
+//  let mut unique_latest_crates = unique_latest_crates(res);
+
+//  let mut infos = Vec::new();
+
+//  for (name, spec) in &mut unique_latest_crates {
+//      let version = spec.version();
+
+//      let pkgid = cargo::core::PackageId::new(&name, &version, &crates_io)
+//          .unwrap_or_else(|e| panic!("Unable to build PackageId for {} {}: {}", name, version, e));
+
+//      let pkg = source.download(&pkgid)
+//          .unwrap_or_else(|e| panic!("Unable to download {} {}: {}", name, version, e));
+
+//      for target in pkg.targets() {
+//          if let cargo::core::TargetKind::Lib(_) = *target.kind() {
+//              infos.push(CrateInformation {
+//                  name: name.clone(),
+//                  version: version.clone(),
+//                  id: target.crate_name()
+//              })
+//          }
+//      }
+
+//      fill_playground_metadata_features(spec, &pkg);
+//  }
+
+//  let manifest = TomlManifest {
+//      package: TomlPackage {
+//          name: "playground".to_owned(),
+//          version: "0.0.1".to_owned(),
+//          authors: vec!["The Rust Playground".to_owned()],
+//      },
+//      profile: Profiles {
+//          dev: Profile { codegen_units: 1, incremental: false },
+//          release: Profile { codegen_units: 1, incremental: false },
+//      },
+//      dependencies: unique_latest_crates,
+//  };
+
+//  // Write manifest file.
+//  let cargo_toml = "../Cargo.toml";
+//  write_manifest(manifest, cargo_toml);
+//  println!("wrote {}", cargo_toml);
 }
